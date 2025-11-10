@@ -207,30 +207,41 @@ class PPO:
 
             # TODO ----- END -----
 
+            # Keep updating the distribution with the current policy as it changes every batch
+            self.actor_critic.update_distribution(observations)
+            current_log_prob = self.actor_critic.get_actions_log_prob(sampled_actions)
+
             # Value function loss computer as mean((V(s) - R)^2)
             value_loss = (value_targets - discounted_returns).pow(2).mean()
 
             # Surrogate loss
-            self.actor_critic.update_distribution(observations)
-            log_prob_action = self.actor_critic.get_actions_log_prob(
-                sampled_actions
+            importance_sampling_ratio = torch.exp(
+                current_log_prob - torch.squeeze(prev_log_probs)
             )
-            importance_sampling_ratio = torch.exp(log_prob_action - torch.squeeze(prev_log_probs))
-            clipped_advs = (
-                torch.clamp(
-                    importance_sampling_ratio,
-                    1.0 - self.clip_param,
-                    1.0 + self.clip_param,
+            clipped_advs = torch.clamp(
+                importance_sampling_ratio,
+                1.0 - self.clip_param,
+                1.0 + self.clip_param,
+            ) * torch.squeeze(advantage_estimates)
+            surrogate_loss = -torch.min(
+                importance_sampling_ratio * torch.squeeze(advantage_estimates),
+                clipped_advs,
+            ).mean()
+
+            # Approximate KL taken from Spinning Up PPO implementation
+            with torch.no_grad():
+                approx_kl = (
+                    (torch.squeeze(prev_log_probs) - current_log_prob).mean().item()
                 )
-                * torch.squeeze(advantage_estimates)
-            )
-            surrogate_loss = (
-                -torch.min(
-                    importance_sampling_ratio * torch.squeeze(advantage_estimates),
-                    clipped_advs,
-                )
-                .mean()
-            )
+
+            if approx_kl > self.desired_kl * 2.0:
+                self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+            elif approx_kl < self.desired_kl / 2.0:
+                self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+            # Update the learning rate for all parameter groups
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = self.learning_rate
 
             # Combine loss
             loss = surrogate_loss + self.value_loss_coef * value_loss
