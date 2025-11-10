@@ -207,6 +207,42 @@ class PPO:
 
             # TODO ----- END -----
 
+            # Value function loss computer as mean((V(s) - R)^2)
+            value_loss = (value_targets - discounted_returns).pow(2).mean().item()
+
+            # Surrogate loss
+            self.actor_critic.update_distribution(observations)
+            log_prob_action = self.actor_critic.get_actions_log_prob(
+                sampled_actions
+            ).detach()
+            importance_sampling_ratio = torch.exp(log_prob_action - prev_log_probs)
+            clipped_advs = (
+                torch.clamp(
+                    importance_sampling_ratio,
+                    1.0 - self.clip_param,
+                    1.0 + self.clip_param,
+                )
+                * advantage_estimates
+            )
+            surrogate_loss = (
+                -torch.min(
+                    importance_sampling_ratio * advantage_estimates,
+                    clipped_advs,
+                )
+                .mean()
+                .item()
+            )
+
+            # Combine loss
+            loss = surrogate_loss + self.value_loss_coef * value_loss
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            mean_value_loss += value_loss
+            mean_surrogate_loss += surrogate_loss
+
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
