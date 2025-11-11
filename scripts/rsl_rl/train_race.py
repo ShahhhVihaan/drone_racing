@@ -22,6 +22,8 @@ import argparse
 from isaaclab.app import AppLauncher
 import cli_args
 
+sys.path.append(os.getcwd())
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
