@@ -194,9 +194,11 @@ class PPO:
 
             # total loss with entropy bonus
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-
+            
+            # gradient step
             self.optimizer.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
             mean_value_loss += value_loss.item()
