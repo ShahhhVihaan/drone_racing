@@ -210,9 +210,10 @@ class PPO:
             # Keep updating the distribution with the current policy as it changes every batch
             self.actor_critic.update_distribution(observations)
             current_log_prob = self.actor_critic.get_actions_log_prob(sampled_actions)
+            current_value_targets = self.actor_critic.evaluate(critic_observations)
 
             # Value function loss computer as mean((V(s) - R)^2)
-            value_loss = (value_targets - discounted_returns).pow(2).mean()
+            value_loss = (current_value_targets - discounted_returns).pow(2).mean()
 
             # Surrogate loss
             importance_sampling_ratio = torch.exp(
