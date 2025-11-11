@@ -192,43 +192,6 @@ class PPO:
             value_loss_clipped = (v_clipped - discounted_returns).pow(2)
             value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
-            # total loss with entropy bonus
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-            
-            # gradient step
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-            self.optimizer.step()
-
-            mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
-            mean_entropy += entropy_batch.mean().item()
-
-            # TODO ----- END -----
-
-            # Keep updating the distribution with the current policy as it changes every batch
-            self.actor_critic.update_distribution(observations)
-            current_log_prob = self.actor_critic.get_actions_log_prob(sampled_actions)
-            current_value_targets = self.actor_critic.evaluate(critic_observations)
-
-            # Value function loss computer as mean((V(s) - R)^2)
-            value_loss = (current_value_targets - discounted_returns).pow(2).mean()
-
-            # Surrogate loss
-            importance_sampling_ratio = torch.exp(
-                current_log_prob - torch.squeeze(prev_log_probs)
-            )
-            clipped_advs = torch.clamp(
-                importance_sampling_ratio,
-                1.0 - self.clip_param,
-                1.0 + self.clip_param,
-            ) * torch.squeeze(advantage_estimates)
-            surrogate_loss = -torch.min(
-                importance_sampling_ratio * torch.squeeze(advantage_estimates),
-                clipped_advs,
-            ).mean()
-
             # Approximate KL taken from Spinning Up PPO implementation
             with torch.no_grad():
                 approx_kl = (
@@ -244,16 +207,21 @@ class PPO:
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = self.learning_rate
 
-            # Combine loss
-            loss = surrogate_loss + self.value_loss_coef * value_loss
-
+            # total loss with entropy bonus
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            
+            # gradient step
             self.optimizer.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
+            mean_entropy += entropy_batch.mean().item()
 
+            # TODO ----- END -----
+            
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
