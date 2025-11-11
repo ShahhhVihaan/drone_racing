@@ -64,7 +64,14 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
+    def init_storage(
+        self,
+        num_envs,
+        num_transitions_per_env,
+        actor_obs_shape,
+        critic_obs_shape,
+        action_shape,
+    ):
         # create rollout storage
         self.storage = RolloutStorage(
             num_envs,
@@ -88,7 +95,9 @@ class PPO:
         # Compute the actions and values
         self.transition.actions = self.actor_critic.act(obs).detach()
         self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
+        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(
+            self.transition.actions
+        ).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
         # need to record obs and critic_obs before env.step()
@@ -105,7 +114,9 @@ class PPO:
         # Bootstrapping on time outs
         if "time_outs" in infos:
             self.transition.rewards += self.gamma * torch.squeeze(
-                self.transition.values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+                self.transition.values
+                * infos["time_outs"].unsqueeze(1).to(self.device),
+                1,
             )
 
         # Record the transition
@@ -117,7 +128,10 @@ class PPO:
         # compute value for the last step
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(
-            last_values, self.gamma, self.lam, normalize_advantage=not self.normalize_advantage_per_mini_batch
+            last_values,
+            self.gamma,
+            self.lam,
+            normalize_advantage=not self.normalize_advantage_per_mini_batch,
         )
 
     def update(self):
@@ -127,9 +141,13 @@ class PPO:
 
         # generator for mini batches
         if self.actor_critic.is_recurrent:
-            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.recurrent_mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
         else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            generator = self.storage.mini_batch_generator(
+                self.num_mini_batches, self.num_learning_epochs
+            )
 
         # iterate over batches
         for (
@@ -148,6 +166,43 @@ class PPO:
         ) in generator:
             # TODO ----- START -----
             # Implement the PPO update step
+
+            self.actor_critic.act(observations)
+            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(sampled_actions)
+            value_batch = self.actor_critic.evaluate(critic_observations)
+            entropy_batch = self.actor_critic.entropy
+
+            # PPO clipped surrogate objective
+            # ratio = pi(a|s) / pi_old(a|s)
+            # prev_log_probs is from storage (old policy)
+            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(prev_log_probs))
+            adv = torch.squeeze(advantage_estimates)
+            surrogate = -adv * ratio
+            ratio_clipped = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+            surrogate_clipped = -adv * ratio_clipped
+            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+            # Value function loss
+            # clipped value loss results in larger raw MSE numbers but more stable critic behavior
+            v_old = value_targets
+            v_pred = value_batch
+            v_clipped = v_old + (v_pred - v_old).clamp(-self.clip_param, self.clip_param)
+            # MSE against discounted returns
+            value_loss_unclipped = (v_pred - discounted_returns).pow(2)
+            value_loss_clipped = (v_clipped - discounted_returns).pow(2)
+            value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+            # total loss with entropy bonus
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            mean_value_loss += value_loss.item()
+            mean_surrogate_loss += surrogate_loss.item()
+            mean_entropy += entropy_batch.mean().item()
+
             # TODO ----- END -----
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
