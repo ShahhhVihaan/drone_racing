@@ -167,10 +167,40 @@ class PPO:
             # TODO ----- START -----
             # Implement the PPO update step
 
-            self.actor_critic.act(observations)
+            orig = observations.shape[0]
+
+            self.actor_critic.act(observations, masks=episode_masks, hidden_state=hidden_states[0])
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(sampled_actions)
-            value_batch = self.actor_critic.evaluate(critic_observations)
-            entropy_batch = self.actor_critic.entropy
+            value_batch = self.actor_critic.evaluate(critic_observations, masks=episode_masks, hidden_state=hidden_states[1])
+            entropy_batch = self.actor_critic.entropy[:orig]
+
+            # with torch.no_grad():
+            #     advantage_estimates = (
+            #         advantage_estimates - advantage_estimates.mean()
+            #     ) / (advantage_estimates.std() + 1e-8)
+
+
+            # mu_batch = self.actor_critic.action_mean[:orig]
+            # sigma_batch = self.actor_critic.action_std[:orig]
+        
+            # if self.desired_kl is not None and self.schedule == "adaptive":
+            #     with torch.inference_mode():
+            #         kl = torch.sum(
+            #             torch.log(sigma_batch / prev_action_stds + 1.0e-5)
+            #             + (torch.square(prev_action_stds) + torch.square(prev_mean_actions - mu_batch))
+            #             / (2.0 * torch.square(sigma_batch))
+            #             - 0.5,
+            #             axis=-1,
+            #         )
+            #         kl_mean = torch.mean(kl)
+            
+            #     if kl_mean > self.desired_kl * 2.0:
+            #         self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+            #     elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+            #         self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+        
+            #     for param_group in self.optimizer.param_groups:
+            #         param_group["lr"] = self.learning_rate
 
             # PPO clipped surrogate objective
             # ratio = pi(a|s) / pi_old(a|s)
