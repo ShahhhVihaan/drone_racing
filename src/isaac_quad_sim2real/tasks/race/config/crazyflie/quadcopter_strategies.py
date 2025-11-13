@@ -72,6 +72,14 @@ class DefaultQuadcopterStrategy:
         if your PPO implementation works. You should delete it or heavily modify it once you begin the racing task."""
 
         # TODO ----- START ----- Define the tensors required for your custom reward structure
+        # progress reward
+        # gate pass
+        # gate miss
+        # crash
+        # lookat_next
+        # time penalty?? - progress and gate pass may be sufficient
+        # ang_vel_l2
+
         # check to change waypoint
         dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
         gate_passed = dist_to_gate < 0.1
@@ -125,25 +133,25 @@ class DefaultQuadcopterStrategy:
 
         ##### Some example observations you may want to explore using
         # Angular velocities (referred to as body rates)
-        # drone_ang_vel_b = self.env._robot.data.root_ang_vel_b  # [roll_rate, pitch_rate, yaw_rate]
+        drone_ang_vel_b = self.env._robot.data.root_ang_vel_b  # [roll_rate, pitch_rate, yaw_rate]
 
         # Current target gate information
-        # current_gate_idx = self.env._idx_wp
-        # current_gate_pos_w = self.env._waypoints[current_gate_idx, :3]  # World position of current gate
+        current_gate_idx = self.env._idx_wp
+        current_gate_pos_w = self.env._waypoints[current_gate_idx, :3]  # World position of current gate
         # current_gate_yaw = self.env._waypoints[current_gate_idx, -1]    # Yaw orientation of current gate
 
         # Relative position to current gate in gate frame
-        drone_pos_gate_frame = self.env._pose_drone_wrt_gate
+        # drone_pos_gate_frame = self.env._pose_drone_wrt_gate
 
         # Relative position to current gate in body frame
-        # gate_pos_b, _ = subtract_frame_transforms(
-        #     self.env._robot.data.root_link_pos_w,
-        #     self.env._robot.data.root_quat_w,
-        #     current_gate_pos_w
-        # )
+        gate_pos_b, _ = subtract_frame_transforms(
+            self.env._robot.data.root_link_pos_w,
+            self.env._robot.data.root_quat_w,
+            current_gate_pos_w
+        )
 
         # Previous actions
-        # prev_actions = self.env._previous_actions  # Shape: (num_envs, 4)
+        prev_actions = self.env._previous_actions  # Shape: (num_envs, 4)
 
         # Number of gates passed
         # gates_passed = self.env._n_gates_passed.unsqueeze(1).float()
@@ -154,9 +162,11 @@ class DefaultQuadcopterStrategy:
             # TODO ----- START ----- List your observation tensors here to be concatenated together
             [
                 drone_pose_w,       # position in the world frame (3 dims)
-                drone_lin_vel_b,    # velocity in the body frame (3 dims)
                 drone_quat_w,       # quaternion in the world frame (4 dims)
-                drone_pos_gate_frame
+                drone_lin_vel_b,    # velocity in the body frame (3 dims)
+                drone_ang_vel_b,    # angular velocity in the body frame (3 dims)
+                gate_pos_b,         # relative position to the current gate in body frame (3 dims)
+                prev_actions,       # previous motor commands (4 dims)
             ],
             # TODO ----- END -----
             dim=-1,
