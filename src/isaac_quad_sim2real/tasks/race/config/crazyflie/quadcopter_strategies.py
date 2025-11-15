@@ -100,8 +100,8 @@ class DefaultQuadcopterStrategy:
 
         # drone pose in gate frame (to determine gate passage)
         # not the same as observation of relative position to gate in body frame
-        gate_pos_w  = self.env._waypoints[self.env._idx_wp, :3]
-        gate_quat_w = self.env._waypoints_quat[self.env._idx_wp, :]
+        gate_pos_w  = self.env._waypoints[self.env._idx_wp, :3]        # (N, 3)
+        gate_quat_w = self.env._waypoints_quat[self.env._idx_wp, :]    # (N, 4)
 
         pose_gate, _ = subtract_frame_transforms(
             gate_pos_w,
@@ -156,6 +156,8 @@ class DefaultQuadcopterStrategy:
                 dim=1,
             )
             self.env._last_distance_to_goal[ids_gate_passed] = new_distance_to_goal
+        self.env._prev_x_drone_wrt_gate[:] = x_gate.detach()
+
 
         # compute crashed environments if contact detected for 100 timesteps
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -163,22 +165,6 @@ class DefaultQuadcopterStrategy:
         mask = (self.env.episode_length_buf > 100).int()
         self.env._crashed = self.env._crashed + crashed * mask
 
-        # look at reward
-        drone_quat_w = self.env._robot.data.root_quat_w              
-        rot_mats = matrix_from_quat(drone_quat_w)             
-
-        drone_x_axis_w = rot_mats[:, :, 0]                          
-        drone_x_axis_w = torch.nn.functional.normalize(drone_x_axis_w, dim=1)
-
-        gate_pos_w = self.env._waypoints[self.env._idx_wp, :3]    
-        vec_to_gate = gate_pos_w - drone_pos_w                    
-        vec_to_gate = torch.nn.functional.normalize(vec_to_gate, dim=1)
-
-        dot = (drone_x_axis_w * vec_to_gate).sum(dim=1).clamp(-1.0, 1.0)
-        angle = torch.acos(dot)
-
-        std = 0.5 # to tune
-        lookat_reward = torch.exp(-angle / std) 
 
         # TODO ----- END -----
 
@@ -416,12 +402,13 @@ class DefaultQuadcopterStrategy:
         # Reset variables
         self.env._yaw_n_laps[env_ids] = 0
 
+        # compute pose of drone in current gate frame after reset
         self.env._pose_drone_wrt_gate[env_ids], _ = subtract_frame_transforms(
             self.env._waypoints[self.env._idx_wp[env_ids], :3],
             self.env._waypoints_quat[self.env._idx_wp[env_ids], :],
             self.env._robot.data.root_link_state_w[env_ids, :3]
         )
 
-        self.env._prev_x_drone_wrt_gate = torch.ones(self.num_envs, device=self.device)
+        self.env._prev_x_drone_wrt_gate[env_ids] = self.env._pose_drone_wrt_gate[env_ids, 0]
 
         self.env._crashed[env_ids] = 0
