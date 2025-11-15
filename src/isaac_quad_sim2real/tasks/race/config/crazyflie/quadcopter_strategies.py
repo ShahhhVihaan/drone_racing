@@ -125,36 +125,48 @@ class DefaultQuadcopterStrategy:
         """Get observations. Read reset_idx() and quadcopter_env.py to see which drone info is extracted from the sim.
         The following code is an example. You should delete it or heavily modify it once you begin the racing task."""
 
+        # We want observations that:
+        #   - expressed in frames that matter for control (world, body, gate)
+        #   - avoid redundant signals
+        #   - support the rewards we define
+
         # TODO ----- START ----- Define tensors for your observation space. Be careful with frame transformations
         #### Basic drone states, modify for your needs)
+
+        # Observation 1: World frame position of drone so that we can help define progress based on distance to the gate in global coordinates
         drone_pose_w = self.env._robot.data.root_link_pos_w
-        drone_lin_vel_b = self.env._robot.data.root_com_lin_vel_b
+
+        # Observation 2:World frame orientation of drone so that we can help define heading relative to the gate in global coordinates
         drone_quat_w = self.env._robot.data.root_quat_w
 
-        ##### Some example observations you may want to explore using
-        # Angular velocities (referred to as body rates)
+        # Observation 3 & 4: Body frame linear velocity and angular velocity of drone for control
+        # Why body frame? It is invariant to global heading and directly tied to control
+        drone_lin_vel_b = self.env._robot.data.root_com_lin_vel_b
         drone_ang_vel_b = self.env._robot.data.root_ang_vel_b  # [roll_rate, pitch_rate, yaw_rate]
 
-        # Current target gate information
+        # current target gate information
         current_gate_idx = self.env._idx_wp
         current_gate_pos_w = self.env._waypoints[current_gate_idx, :3]  # World position of current gate
-        # current_gate_yaw = self.env._waypoints[current_gate_idx, -1]    # Yaw orientation of current gate
 
-        # Relative position to current gate in gate frame
-        # drone_pos_gate_frame = self.env._pose_drone_wrt_gate
-
-        # Relative position to current gate in body frame
+        # Observation 5: Relative position to current gate in body frame
+        # Why body frame and not gate frame? 
+        # It tells the policy "where is the gate relative to me right now?" independent of where we are in the world
+        # One more thing: we are using center of gate not the 4 corners
         gate_pos_b, _ = subtract_frame_transforms(
             self.env._robot.data.root_link_pos_w,
             self.env._robot.data.root_quat_w,
             current_gate_pos_w
         )
 
-        # Previous actions
+        # Observation 6: Previous actions for continuity
         prev_actions = self.env._previous_actions  # Shape: (num_envs, 4)
 
-        # Number of gates passed
-        # gates_passed = self.env._n_gates_passed.unsqueeze(1).float()
+
+        # TO CONSIDER:
+        # 1. Above observations may not be sufficient or the best choice for racing
+        # 2. Number of gates passed
+            # gates_passed = self.env._n_gates_passed.unsqueeze(1).float()
+
 
         # TODO ----- END -----
 
