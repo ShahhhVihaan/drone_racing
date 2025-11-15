@@ -95,7 +95,41 @@ class DefaultQuadcopterStrategy:
         # Progress: positive when we move closer, negative when we move away
         raw_progress = prev_distance_to_goal - distance_to_goal
         # to keep values bounded
+        # To revisit - this did stabilise training but didn't learn gate pass - progress = torch.clamp(raw_progress, min=0.0)
         progress = torch.tanh(raw_progress)
+
+        # drone pose in gate frame (to determine gate passage)
+        # not the same as observation of relative position to gate in body frame
+        gate_pos_w  = self.env._waypoints[self.env._idx_wp, :3]        # (N, 3)
+        gate_quat_w = self.env._waypoints_quat[self.env._idx_wp, :]    # (N, 4)
+
+        pose_gate, _ = subtract_frame_transforms(
+            gate_pos_w,
+            gate_quat_w,
+            drone_pos_w,
+        )
+        self.env._pose_drone_wrt_gate = pose_gate
+
+        x_gate = pose_gate[:, 0]
+        y_gate = pose_gate[:, 1]
+        z_gate = pose_gate[:, 2]
+
+        gate_half_side = self.env.cfg.gate_model.gate_side / 2.0
+
+        margin = 0.0 # do we need it be non-zero since this is just for pass condition
+        y_limit = gate_half_side - margin
+        z_limit = gate_half_side - margin
+
+        # rectangular gate opening
+        inside_opening = (torch.abs(y_gate) < y_limit) & (torch.abs(z_gate) < z_limit)
+
+        # directionality use previous x in gate frame and
+        # correct-direction crossing from negative x to non-negative x
+        prev_x = self.env._prev_x_drone_wrt_gate
+        crossed_plane_correct_dir = (prev_x < 0.0) & (x_gate >= 0.0)
+
+        gate_passed = inside_opening & crossed_plane_correct_dir
+        ids_gate_passed = torch.where(gate_passed)[0]
 
         dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
         gate_passed = dist_to_gate < 0.1
@@ -132,6 +166,8 @@ class DefaultQuadcopterStrategy:
         crashed = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1).int()
         mask = (self.env.episode_length_buf > 100).int()
         self.env._crashed = self.env._crashed + crashed * mask
+
+
         # TODO ----- END -----
 
         if self.cfg.is_train:
@@ -140,6 +176,7 @@ class DefaultQuadcopterStrategy:
                 "progress_goal": progress * self.env.rew['progress_goal_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
                 "gate_pass": gate_passed * self.env.rew['gate_pass_reward_scale'],
+                "lookat_next": lookat_reward * self.env.rew['lookat_next_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(self.env.reset_terminated,
