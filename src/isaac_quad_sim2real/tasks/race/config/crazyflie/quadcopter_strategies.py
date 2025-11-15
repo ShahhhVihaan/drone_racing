@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
-from isaaclab.utils.math import subtract_frame_transforms, quat_from_euler_xyz, euler_xyz_from_quat, wrap_to_pi, matrix_from_quat
+from isaaclab.utils.math import subtract_frame_transforms, quat_from_euler_xyz, euler_xyz_from_quat, wrap_to_pi, matrix_from_quat, apply_delta_pose
 
 if TYPE_CHECKING:
     from .quadcopter_env import QuadcopterEnv
@@ -65,6 +65,9 @@ class DefaultQuadcopterStrategy:
         # Thrust to weight ratio
         self.env._thrust_to_weight[:] = self.env._twr_value
 
+        # To track number of gates passed by each quadrotor
+        self.env._n_gates_passed = torch.zeros(self.env.num_envs, dtype=torch.int, device=self.device)
+
     def get_rewards(self) -> torch.Tensor:
         """get_rewards() is called per timestep. This is where you define your reward structure and compute them
         according to the reward scales you tune in train_race.py. The following is an example reward structure that
@@ -76,7 +79,9 @@ class DefaultQuadcopterStrategy:
         dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
         gate_passed = dist_to_gate < 0.1
         ids_gate_passed = torch.where(gate_passed)[0]
-        self.env._idx_wp[ids_gate_passed] = (self.env._idx_wp[ids_gate_passed] + 1) % self.env._waypoints.shape[0]
+        self.env._n_gates_passed[ids_gate_passed] += 1
+        # identifier for the gate
+        self.env._idx_wp[ids_gate_passed] = (self.env._n_gates_passed[ids_gate_passed]) % self.env._waypoints.shape[0]
 
         # set desired positions in the world frame
         self.env._desired_pos_w[ids_gate_passed, :2] = self.env._waypoints[self.env._idx_wp[ids_gate_passed], :2]
@@ -97,7 +102,7 @@ class DefaultQuadcopterStrategy:
         if self.cfg.is_train:
             # TODO ----- START ----- Compute per-timestep rewards by multiplying with your reward scales (in train_race.py)
             rewards = {
-                "progress_goal": progress * self.env.rew['progress_goal_reward_scale'],
+                "progress_goal": (self.env._idx_wp + progress) * self.env.rew['progress_goal_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -128,9 +133,10 @@ class DefaultQuadcopterStrategy:
         # drone_ang_vel_b = self.env._robot.data.root_ang_vel_b  # [roll_rate, pitch_rate, yaw_rate]
 
         # Current target gate information
-        # current_gate_idx = self.env._idx_wp
-        # current_gate_pos_w = self.env._waypoints[current_gate_idx, :3]  # World position of current gate
-        # current_gate_yaw = self.env._waypoints[current_gate_idx, -1]    # Yaw orientation of current gate
+        current_gate_idx = self.env._idx_wp
+        current_gate_pos_w = self.env._waypoints[current_gate_idx, :3]  # World position of current gate
+        current_gate_quat_w = self.env._waypoints_quat[current_gate_idx]  # World orientation of current gate
+        current_gate_yaw = self.env._waypoints[current_gate_idx, -1]    # Yaw orientation of current gate
 
         # Relative position to current gate in gate frame
         drone_pos_gate_frame = self.env._pose_drone_wrt_gate
@@ -141,6 +147,26 @@ class DefaultQuadcopterStrategy:
         #     self.env._robot.data.root_quat_w,
         #     current_gate_pos_w
         # )
+
+        bounding_box_size = 0.5 # Assuming cubic gates for simplicity
+        corner_pos_b = []
+        for direction in [(1,0), (0,1), (-1,0), (0,-1)]:
+            d = [direction[0], direction[1], 0, 0, 0, 0]
+            offset =  torch.tensor(d, device=self.device) * (bounding_box_size / 2.0)
+            gate_corner_pos_w, gate_corner_quat_w = apply_delta_pose(
+                current_gate_pos_w,
+                current_gate_quat_w,
+                offset.reshape(1,6)
+            )
+            gate_corner_b, _ = subtract_frame_transforms(
+                self.env._robot.data.root_link_pos_w,
+                self.env._robot.data.root_quat_w,
+                gate_corner_pos_w,
+                gate_corner_quat_w
+            )
+            corner_pos_b.append(gate_corner_b)
+
+            # You can use gate_corner_pos_w as needed
 
         # Previous actions
         # prev_actions = self.env._previous_actions  # Shape: (num_envs, 4)
@@ -156,7 +182,8 @@ class DefaultQuadcopterStrategy:
                 drone_pose_w,       # position in the world frame (3 dims)
                 drone_lin_vel_b,    # velocity in the body frame (3 dims)
                 drone_quat_w,       # quaternion in the world frame (4 dims)
-                drone_pos_gate_frame
+                drone_pos_gate_frame,
+                *corner_pos_b,
             ],
             # TODO ----- END -----
             dim=-1,
@@ -223,6 +250,52 @@ class DefaultQuadcopterStrategy:
         # TODO ----- START ----- Define the initial state during training after resetting an environment.
         # This example code initializes the drone 2m behind the first gate. You should delete it or heavily
         # modify it once you begin the racing task.
+
+        # Randomize Kp, Ki, Kd values
+        random_scaling = np.random.sample(9)
+        # Aerodynamic drag coefficients
+        self.env._K_aero[:, :2] = (
+            0.5 * self.env._k_aero_xy_value
+            + 1.5 * self.env._k_aero_xy_value * random_scaling[0]
+        )
+        self.env._K_aero[:, 2] = (
+            0.5 * self.env._k_aero_z_value
+            + 1.5 * self.env._k_aero_z_value * random_scaling[1]
+        )
+
+        # PID controller gains for angular rate control
+        # Roll and pitch use the same gains
+        self.env._kp_omega[:, :2] = (
+            0.85 * self.env._kp_omega_rp_value
+            + 0.30 * self.env._kp_omega_rp_value * random_scaling[2]
+        )
+        self.env._ki_omega[:, :2] = (
+            0.85 * self.env._ki_omega_rp_value
+            + 0.30 * self.env._ki_omega_rp_value * random_scaling[3]
+        )
+        self.env._kd_omega[:, :2] = (
+            0.70 * self.env._kd_omega_rp_value
+            + 0.60 * self.env._kd_omega_rp_value * random_scaling[4]
+        )
+
+        # Yaw has different gains
+        self.env._kp_omega[:, 2] = (
+            0.85 * self.env._kp_omega_y_value
+            + 0.30 * self.env._kp_omega_y_value * random_scaling[5]
+        )
+        self.env._ki_omega[:, 2] = (
+            0.85 * self.env._ki_omega_y_value
+            + 0.30 * self.env._ki_omega_y_value * random_scaling[6]
+        )
+        self.env._kd_omega[:, 2] = (
+            0.70 * self.env._kd_omega_y_value
+            + 0.60 * self.env._kd_omega_y_value * random_scaling[7]
+        )
+
+        # Thrust to weight ratio
+        self.env._thrust_to_weight[:] = (
+            0.95 * self.env._twr_value + 0.10 * self.env._twr_value * random_scaling[8]
+        )
 
         # start from the zeroth waypoint (beginning of the race)
         waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)

@@ -193,15 +193,15 @@ class PPO:
             value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
             # Approximate KL taken from Spinning Up PPO implementation
-            with torch.no_grad():
-                approx_kl = (
-                    (torch.squeeze(prev_log_probs) - current_log_prob).mean().item()
-                )
+            # with torch.no_grad():
+            #     approx_kl = (
+            #         (torch.squeeze(prev_log_probs) - actions_log_prob_batch).mean().item()
+            #     )
 
-            if approx_kl > self.desired_kl * 2.0:
-                self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-            elif approx_kl < self.desired_kl / 2.0:
-                self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+            # if approx_kl > self.desired_kl * 2.0:
+            #     self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+            # elif approx_kl < self.desired_kl / 2.0:
+            #     self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
             # Update the learning rate for all parameter groups
             for param_group in self.optimizer.param_groups:
@@ -221,7 +221,7 @@ class PPO:
             mean_entropy += entropy_batch.mean().item()
 
             # TODO ----- END -----
-            
+
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
