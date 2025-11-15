@@ -37,7 +37,7 @@ class DefaultQuadcopterStrategy:
         # Initialize episode sums for logging if in training mode
         if self.cfg.is_train and hasattr(env, 'rew'):
             keys = [key.split("_reward_scale")[0] for key in env.rew.keys() if key != "death_cost"]
-            keys.append("progress_next_goal")  # Example additional key
+            # keys.append("progress_next_goal")  # Example additional key
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
                 for key in keys
@@ -70,6 +70,45 @@ class DefaultQuadcopterStrategy:
         self._idx_next_wp = (self.env._idx_wp + 1) % self.env._waypoints.shape[0]
         self._desired_next_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # https://gamedev.stackexchange.com/questions/169388/most-efficient-way-to-get-the-closest-point-to-a-3d-rectangle#:~:text=Let%20%E2%86%92n%20be%20a,%E2%86%92y=%E2%86%92DA.
+        lower_right_corner = torch.tensor([0, -1, -1, 0, 0, 0], device=self.device) * (self.env.cfg.gate_model.gate_side / 2.0)
+        offset =  torch.tensor(lower_right_corner, device=self.device)
+        gate_corner_pos_w, gate_corner_quat_w = apply_delta_pose(
+            self.env._waypoints[:, :3],
+            self.env._waypoints_quat,
+            offset.reshape(1,6)
+        )
+        self._waypoints_lower_right_corners = (gate_corner_pos_w, gate_corner_quat_w)
+       
+        self._DC = torch.tensor([0.0, self.env.cfg.gate_model.gate_side, 0.0], device=self.device)
+        self._lc = torch.dot(self._DC, self._DC)
+
+        self._DA = torch.tensor([0.0, 0.0, self.env.cfg.gate_model.gate_side], device=self.device)
+        self._la = torch.dot(self._DA, self._DA)
+
+        
+
+    def get_min_distance_to_goal_square(self) -> torch.Tensor:
+        idx_wp = self.env._idx_wp
+
+        DP = self.env._robot.data.root_link_pos_w - self._waypoints_lower_right_corners[0][idx_wp]
+        a = torch.sum(DP * self._DC, dim=1)
+        b = torch.sum(DP * self._DA, dim=1)
+        
+        x = (a.unsqueeze(1) * self._DC.unsqueeze(0)) / self._lc
+        y = (b.unsqueeze(1) * self._DA.unsqueeze(0)) / self._la
+
+        x[torch.where(a < 0)[0]] = 0
+        x[torch.where(a > self._lc)[0]] = self._lc
+
+        y[torch.where(b < 0)[0]] = 0
+        y[torch.where(b > self._la)[0]] = self._la
+
+        # Compute the closest point on the square
+        closest_point = self._waypoints_lower_right_corners[0][idx_wp] + x + y
+        return closest_point
+
+
     def get_rewards(self) -> torch.Tensor:
         """get_rewards() is called per timestep. This is where you define your reward structure and compute them
         according to the reward scales you tune in train_race.py. The following is an example reward structure that
@@ -78,29 +117,50 @@ class DefaultQuadcopterStrategy:
 
         # TODO ----- START ----- Define the tensors required for your custom reward structure
         # check to change waypoint
-        dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
-        gate_passed = dist_to_gate < 0.1
+        # dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
+        # gate_passed = dist_to_gate < 0.1
+        x_gate = self.env._pose_drone_wrt_gate[:, 0]
+        y_gate = self.env._pose_drone_wrt_gate[:, 1]
+        z_gate = self.env._pose_drone_wrt_gate[:, 2]
+
+        gate_half_side = self.env.cfg.gate_model.gate_side / 2.0
+
+        margin = 0.0 # do we need it be non-zero since this is just for pass condition
+        y_limit = gate_half_side - margin
+        z_limit = gate_half_side - margin
+
+        # rectangular gate opening
+        inside_opening = (torch.abs(y_gate) < y_limit) & (torch.abs(z_gate) < z_limit)
+
+        prev_x = self.env._prev_x_drone_wrt_gate
+        crossed_plane_correct_dir = (prev_x < 0.0) & (x_gate >= 0.0)
+        self.env.prev_x_drone_wrt_gate = x_gate.clone()
+
+        gate_passed = inside_opening & crossed_plane_correct_dir
         ids_gate_passed = torch.where(gate_passed)[0]
+
         self.env._n_gates_passed[ids_gate_passed] += 1
         # identifier for the gate
         self.env._idx_wp[ids_gate_passed] = (self.env._n_gates_passed[ids_gate_passed]) % self.env._waypoints.shape[0]
-
         # set desired positions in the world frame
         self.env._desired_pos_w[ids_gate_passed, :2] = self.env._waypoints[self.env._idx_wp[ids_gate_passed], :2]
         self.env._desired_pos_w[ids_gate_passed, 2] = self.env._waypoints[self.env._idx_wp[ids_gate_passed], 2]
 
         # calculate progress via distance to goal
-        distance_to_goal = torch.linalg.norm(self.env._desired_pos_w - self.env._robot.data.root_link_pos_w, dim=1)
+        distance_to_goal = torch.linalg.norm(self.get_min_distance_to_goal_square() - self.env._robot.data.root_link_pos_w, dim=1)
         distance_to_goal = torch.tanh(distance_to_goal/3.0)
+        # _, _, yaw = euler_xyz_from_quat(self.env._robot.data.root_quat_w)
+        # rot_err = torch.cos(self.env._waypoints[self.env._idx_wp, -1]  - yaw)  # Yaw orientation of current gate
+
         progress = 1 - distance_to_goal  # distance_to_goal is between 0 and 1 where 0 means the drone reached the goal
 
         # lookahead desired positions in the world frame
-        self._idx_next_wp[ids_gate_passed] = (self.env._idx_wp[ids_gate_passed] + 1) % self.env._waypoints.shape[0]
-        self._desired_next_pos_w[ids_gate_passed, :2] = self.env._waypoints[self._idx_next_wp[ids_gate_passed], :2]
-        self._desired_next_pos_w[ids_gate_passed, 2] = self.env._waypoints[self._idx_next_wp[ids_gate_passed], 2]
-        distance_to_next_goal = torch.linalg.norm(self._desired_next_pos_w - self.env._robot.data.root_link_pos_w, dim=1)
-        distance_to_next_goal = torch.tanh(distance_to_next_goal/3.0)
-        progress_next = 1 - distance_to_next_goal  # distance_to_next_goal is between 0 and 1 where 0 means the drone reached the goal
+        # self._idx_next_wp[ids_gate_passed] = (self.env._idx_wp[ids_gate_passed] + 1) % self.env._waypoints.shape[0]
+        # self._desired_next_pos_w[ids_gate_passed, :2] = self.env._waypoints[self._idx_next_wp[ids_gate_passed], :2]
+        # self._desired_next_pos_w[ids_gate_passed, 2] = self.env._waypoints[self._idx_next_wp[ids_gate_passed], 2]
+        # distance_to_next_goal = torch.linalg.norm(self._desired_next_pos_w - self.env._robot.data.root_link_pos_w, dim=1)
+        # distance_to_next_goal = torch.tanh(distance_to_next_goal/3.0)
+        # progress_next = 1 - distance_to_next_goal  # distance_to_next_goal is between 0 and 1 where 0 means the drone reached the goal
 
         # compute crashed environments if contact detected for 100 timesteps
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -113,7 +173,7 @@ class DefaultQuadcopterStrategy:
             # TODO ----- START ----- Compute per-timestep rewards by multiplying with your reward scales (in train_race.py)
             rewards = {
                 "progress_goal": (self.env._idx_wp + progress) * self.env.rew['progress_goal_reward_scale'],
-                "progress_next_goal": (self.env._idx_wp + progress_next) * self.env.rew['progress_goal_reward_scale'] / 2,
+                # "progress_next_goal": (self.env._idx_wp + progress_next) * self.env.rew['progress_goal_reward_scale'] / 2,
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -407,6 +467,6 @@ class DefaultQuadcopterStrategy:
         self._desired_next_pos_w[env_ids, :2] = self.env._waypoints[self._idx_next_wp[env_ids], :2].clone()
         self._desired_next_pos_w[env_ids, 2] = self.env._waypoints[self._idx_next_wp[env_ids], 2].clone()
 
-        self.env._prev_x_drone_wrt_gate = torch.ones(self.num_envs, device=self.device)
+        self.env._prev_x_drone_wrt_gate[env_ids] = self.env._pose_drone_wrt_gate[env_ids, 0].clone()
 
         self.env._crashed[env_ids] = 0
