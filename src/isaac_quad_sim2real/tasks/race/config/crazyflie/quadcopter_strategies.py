@@ -37,6 +37,7 @@ class DefaultQuadcopterStrategy:
         # Initialize episode sums for logging if in training mode
         if self.cfg.is_train and hasattr(env, 'rew'):
             keys = [key.split("_reward_scale")[0] for key in env.rew.keys() if key != "death_cost"]
+            keys.append("progress_next_goal")  # Example additional key
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
                 for key in keys
@@ -65,8 +66,9 @@ class DefaultQuadcopterStrategy:
         # Thrust to weight ratio
         self.env._thrust_to_weight[:] = self.env._twr_value
 
-        # To track number of gates passed by each quadrotor
-        self.env._n_gates_passed = torch.zeros(self.env.num_envs, dtype=torch.int, device=self.device)
+        # pose wrt next gate
+        self._idx_next_wp = (self.env._idx_wp + 1) % self.env._waypoints.shape[0]
+        self._desired_next_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
     def get_rewards(self) -> torch.Tensor:
         """get_rewards() is called per timestep. This is where you define your reward structure and compute them
@@ -92,6 +94,14 @@ class DefaultQuadcopterStrategy:
         distance_to_goal = torch.tanh(distance_to_goal/3.0)
         progress = 1 - distance_to_goal  # distance_to_goal is between 0 and 1 where 0 means the drone reached the goal
 
+        # lookahead desired positions in the world frame
+        self._idx_next_wp[ids_gate_passed] = (self.env._idx_wp[ids_gate_passed] + 1) % self.env._waypoints.shape[0]
+        self._desired_next_pos_w[ids_gate_passed, :2] = self.env._waypoints[self._idx_next_wp[ids_gate_passed], :2]
+        self._desired_next_pos_w[ids_gate_passed, 2] = self.env._waypoints[self._idx_next_wp[ids_gate_passed], 2]
+        distance_to_next_goal = torch.linalg.norm(self._desired_next_pos_w - self.env._robot.data.root_link_pos_w, dim=1)
+        distance_to_next_goal = torch.tanh(distance_to_next_goal/3.0)
+        progress_next = 1 - distance_to_next_goal  # distance_to_next_goal is between 0 and 1 where 0 means the drone reached the goal
+
         # compute crashed environments if contact detected for 100 timesteps
         contact_forces = self.env._contact_sensor.data.net_forces_w
         crashed = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1).int()
@@ -103,6 +113,7 @@ class DefaultQuadcopterStrategy:
             # TODO ----- START ----- Compute per-timestep rewards by multiplying with your reward scales (in train_race.py)
             rewards = {
                 "progress_goal": (self.env._idx_wp + progress) * self.env.rew['progress_goal_reward_scale'],
+                "progress_next_goal": (self.env._idx_wp + progress_next) * self.env.rew['progress_goal_reward_scale'] / 2,
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -390,6 +401,11 @@ class DefaultQuadcopterStrategy:
             self.env._waypoints_quat[self.env._idx_wp[env_ids], :],
             self.env._robot.data.root_link_state_w[env_ids, :3]
         )
+
+        self._idx_next_wp[env_ids] = (self.env._idx_wp[env_ids] + 1) % self.env._waypoints.shape[0]
+
+        self._desired_next_pos_w[env_ids, :2] = self.env._waypoints[self._idx_next_wp[env_ids], :2].clone()
+        self._desired_next_pos_w[env_ids, 2] = self.env._waypoints[self._idx_next_wp[env_ids], 2].clone()
 
         self.env._prev_x_drone_wrt_gate = torch.ones(self.num_envs, device=self.device)
 
