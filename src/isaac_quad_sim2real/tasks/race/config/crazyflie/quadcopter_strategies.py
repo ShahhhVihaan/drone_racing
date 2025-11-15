@@ -80,20 +80,52 @@ class DefaultQuadcopterStrategy:
         # time penalty?? - progress and gate pass may be sufficient
         # ang_vel_l2
 
-        # check to change waypoint
+        drone_pos_w = self.env._robot.data.root_link_pos_w 
+        desired_pos_w = self.env._desired_pos_w
+
+        # Distance to current gate in world frame
+        distance_to_goal = torch.linalg.norm(
+            desired_pos_w - drone_pos_w,
+            dim=1,
+        )
+
+        # Previous distance stored in env (set in reset_idx)
+        prev_distance_to_goal = self.env._last_distance_to_goal
+
+        # Progress: positive when we move closer, negative when we move away
+        raw_progress = prev_distance_to_goal - distance_to_goal
+        # to keep values bounded
+        progress = torch.tanh(raw_progress)
+
         dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
         gate_passed = dist_to_gate < 0.1
         ids_gate_passed = torch.where(gate_passed)[0]
-        self.env._idx_wp[ids_gate_passed] = (self.env._idx_wp[ids_gate_passed] + 1) % self.env._waypoints.shape[0]
 
-        # set desired positions in the world frame
-        self.env._desired_pos_w[ids_gate_passed, :2] = self.env._waypoints[self.env._idx_wp[ids_gate_passed], :2]
-        self.env._desired_pos_w[ids_gate_passed, 2] = self.env._waypoints[self.env._idx_wp[ids_gate_passed], 2]
+        if ids_gate_passed.numel() > 0:
+            # Advance waypoint index (wrap around)
+            self.env._idx_wp[ids_gate_passed] = (
+                self.env._idx_wp[ids_gate_passed] + 1
+            ) % self.env._waypoints.shape[0]
 
-        # calculate progress via distance to goal
-        distance_to_goal = torch.linalg.norm(self.env._desired_pos_w - self.env._robot.data.root_link_pos_w, dim=1)
-        distance_to_goal = torch.tanh(distance_to_goal/3.0)
-        progress = 1 - distance_to_goal  # distance_to_goal is between 0 and 1 where 0 means the drone reached the goal
+            # Set desired positions in world frame to the NEW gate
+            self.env._desired_pos_w[ids_gate_passed, :2] = \
+                self.env._waypoints[self.env._idx_wp[ids_gate_passed], :2]
+            self.env._desired_pos_w[ids_gate_passed, 2] = \
+                self.env._waypoints[self.env._idx_wp[ids_gate_passed], 2]
+
+            self.env._n_gates_passed[ids_gate_passed] += 1
+
+        # For envs that did NOT pass a gate, next step's "previous distance" is just d_t
+        self.env._last_distance_to_goal = distance_to_goal.clone()
+
+        # For envs that DID pass a gate, the goal just changed,
+        # so we reset their baseline distance to the distance to the NEW gate
+        if ids_gate_passed.numel() > 0:
+            new_distance_to_goal = torch.linalg.norm(
+                self.env._desired_pos_w[ids_gate_passed] - drone_pos_w[ids_gate_passed],
+                dim=1,
+            )
+            self.env._last_distance_to_goal[ids_gate_passed] = new_distance_to_goal
 
         # compute crashed environments if contact detected for 100 timesteps
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -107,6 +139,7 @@ class DefaultQuadcopterStrategy:
             rewards = {
                 "progress_goal": progress * self.env.rew['progress_goal_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
+                "gate_pass": gate_passed * self.env.rew['gate_pass_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(self.env.reset_terminated,
@@ -323,7 +356,7 @@ class DefaultQuadcopterStrategy:
         self.env._desired_pos_w[env_ids, 2] = self.env._waypoints[waypoint_indices, 2].clone()
 
         self.env._last_distance_to_goal[env_ids] = torch.linalg.norm(
-            self.env._desired_pos_w[env_ids, :2] - self.env._robot.data.root_link_pos_w[env_ids, :2], dim=1
+            self.env._desired_pos_w[env_ids] - self.env._robot.data.root_link_pos_w[env_ids], dim=1
         )
         self.env._n_gates_passed[env_ids] = 0
 
