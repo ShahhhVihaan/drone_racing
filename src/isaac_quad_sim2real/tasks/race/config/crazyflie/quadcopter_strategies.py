@@ -100,8 +100,8 @@ class DefaultQuadcopterStrategy:
 
         # drone pose in gate frame (to determine gate passage)
         # not the same as observation of relative position to gate in body frame
-        gate_pos_w  = self.env._waypoints[self.env._idx_wp, :3]        # (N, 3)
-        gate_quat_w = self.env._waypoints_quat[self.env._idx_wp, :]    # (N, 4)
+        gate_pos_w  = self.env._waypoints[self.env._idx_wp, :3]
+        gate_quat_w = self.env._waypoints_quat[self.env._idx_wp, :]
 
         pose_gate, _ = subtract_frame_transforms(
             gate_pos_w,
@@ -129,10 +129,6 @@ class DefaultQuadcopterStrategy:
         crossed_plane_correct_dir = (prev_x < 0.0) & (x_gate >= 0.0)
 
         gate_passed = inside_opening & crossed_plane_correct_dir
-        ids_gate_passed = torch.where(gate_passed)[0]
-
-        dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
-        gate_passed = dist_to_gate < 0.1
         ids_gate_passed = torch.where(gate_passed)[0]
 
         if ids_gate_passed.numel() > 0:
@@ -167,6 +163,22 @@ class DefaultQuadcopterStrategy:
         mask = (self.env.episode_length_buf > 100).int()
         self.env._crashed = self.env._crashed + crashed * mask
 
+        # look at reward
+        drone_quat_w = self.env._robot.data.root_quat_w              
+        rot_mats = matrix_from_quat(drone_quat_w)             
+
+        drone_x_axis_w = rot_mats[:, :, 0]                          
+        drone_x_axis_w = torch.nn.functional.normalize(drone_x_axis_w, dim=1)
+
+        gate_pos_w = self.env._waypoints[self.env._idx_wp, :3]    
+        vec_to_gate = gate_pos_w - drone_pos_w                    
+        vec_to_gate = torch.nn.functional.normalize(vec_to_gate, dim=1)
+
+        dot = (drone_x_axis_w * vec_to_gate).sum(dim=1).clamp(-1.0, 1.0)
+        angle = torch.acos(dot)
+
+        std = 0.5 # to tune
+        lookat_reward = torch.exp(-angle / std) 
 
         # TODO ----- END -----
 
@@ -176,7 +188,7 @@ class DefaultQuadcopterStrategy:
                 "progress_goal": progress * self.env.rew['progress_goal_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
                 "gate_pass": gate_passed * self.env.rew['gate_pass_reward_scale'],
-                "lookat_next": lookat_reward * self.env.rew['lookat_next_reward_scale'],
+                # "lookat_next": lookat_reward * self.env.rew['lookat_next_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(self.env.reset_terminated,
